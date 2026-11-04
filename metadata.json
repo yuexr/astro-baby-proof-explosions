@@ -1,0 +1,17 @@
+{
+  "schema_version": 2,
+  "name": "Baby-Proof Explosions",
+  "mod_id": "BabyProofDynamites",
+  "author": "yuexr",
+  "version": "1.4.0",
+  "game_build": "1.45.1.0",
+  "sync": "serverclient",
+  "description": "Tiny explosions that protect equipment, with toggleable vehicle protection.",
+  "homepage": "https://github.com/yuexr/astro-baby-proof-explosions",
+  "enable_ue4ss": true,
+  "download": {
+    "type": "index_file",
+    "url": "https://yuexr.github.io/astro/mods/index.json"
+  }
+
+}
