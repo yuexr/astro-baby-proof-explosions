@@ -106,19 +106,46 @@ int main(void) {
     prepare_jump(&patches[0],stub);prepare_jump(&patches[1],guard);
     CHECK(!install_patches(patches));CHECK(!memcmp(target,signature,7));CHECK(!memcmp(destroy,destroy_signature,7));
     patches[1].expected=destroy_signature;CHECK(install_patches(patches));
-    unsigned char component[512],expected[512];memset(component,0x5A,sizeof(component));memcpy(expected,component,sizeof(component));
+    unsigned char test_owner[384]={0},test_level[256]={0},test_world[256]={0};
+    unsigned char level_class[96]={0},world_class[96]={0},level_prop[0x50]={0},world_prop[0x50]={0};
+    set_class(test_level,level_class,"Level");set_class(test_world,world_class,"World");
+    uint32_t fname=add_name("OwningWorld"),fieldsize=8,fieldoffset=0x80;
+    memcpy(level_prop+0x28,&fname,4);memcpy(level_prop+0x3C,&fieldsize,4);memcpy(level_prop+0x4C,&fieldoffset,4);
+    fname=add_name("AuthorityGameMode");fieldoffset=0x88;
+    memcpy(world_prop+0x28,&fname,4);memcpy(world_prop+0x3C,&fieldsize,4);memcpy(world_prop+0x4C,&fieldoffset,4);
+    void *netptr=level_prop;memcpy(level_class+0x50,&netptr,8);
+    netptr=world_prop;memcpy(world_class+0x50,&netptr,8);
+    netptr=test_level;memcpy(test_owner+0x20,&netptr,8);
+    netptr=test_world;memcpy(test_level+0x80,&netptr,8);
+    netptr=test_owner;memcpy(test_world+0x88,&netptr,8);
+    unsigned char component[512],expected[512];memset(component,0x5A,sizeof(component));
+    netptr=test_owner;memcpy(component+0xA8,&netptr,8);memcpy(expected,component,sizeof(component));
     const uint32_t offsets[]={0xB8,0xC0,0xC4,0xC8};const float values[]={0.000001f,0.0f,0.001f,0.001f};
     for(unsigned i=0;i<4;++i)memcpy(expected+offsets[i],values+i,4);
     CHECK(((DetonateTest)target)(component)==1);CHECK(!memcmp(component,expected,sizeof(component)));
     set_class(actor,cls,"Smelter_C");CHECK(((DestroyFunction)destroy)(component,actor)==0);
     InterlockedExchange(&safe_explosions,0);
-    memset(component,0x5A,sizeof(component));
+    memset(component,0x5A,sizeof(component));netptr=test_owner;memcpy(component+0xA8,&netptr,8);
     unsigned char vanilla[512];memcpy(vanilla,component,sizeof(vanilla));
     CHECK(((DetonateTest)target)(component)==1);CHECK(!memcmp(component,vanilla,sizeof(component)));
     CHECK(((DestroyFunction)destroy)(component,actor)==1);
     InterlockedExchange(&safe_explosions,1);
     CHECK(((DetonateTest)target)(component)==1);CHECK(!memcmp(component,expected,sizeof(component)));
     CHECK(((DestroyFunction)destroy)(component,actor)==0);
+    // Joining clients have no authoritative game mode, even when locally enabled.
+    memset(test_world+0x88,0,8);memcpy(component,vanilla,sizeof(component));
+    CHECK(!should_protect_component(component));
+    CHECK(((DetonateTest)target)(component)==1);CHECK(!memcmp(component,vanilla,sizeof(component)));
+    CHECK(((DestroyFunction)destroy)(component,actor)==1);
+    // An unknown/unreadable world must also leave every explosion field untouched.
+    netptr=(void *)(uintptr_t)1;memcpy(test_level+0x80,&netptr,8);
+    CHECK(((DetonateTest)target)(component)==1);CHECK(!memcmp(component,vanilla,sizeof(component)));
+    netptr=test_world;memcpy(test_level+0x80,&netptr,8);
+    netptr=test_owner;memcpy(test_world+0x88,&netptr,8);
+    CHECK(should_protect_component(component));
+    CHECK(((DetonateTest)target)(component)==1);CHECK(!memcmp(component,expected,sizeof(component)));
+    CHECK(((DestroyFunction)destroy)(component,actor)==0);
+    puts("PASS: client and unreadable worlds pass through native detours without field writes; authority restored after world changes.");
     puts("PASS: main OFF skips every blast-field write and passes destruction to vanilla; main ON restores safe fields and equipment protection through installed hooks.");
     set_class(actor,cls,"Destructible_PlacementActor_DataCache_EXOChip_C");CHECK(((DestroyFunction)destroy)(component,actor)==1);
     set_class(actor,cls,"Debris_Base_01_C");CHECK(((DestroyFunction)destroy)(component,actor)==1);
@@ -137,7 +164,8 @@ int main(void) {
     unsigned char explosive[384]={0},root[512]={0},mount[512]={0};
     unsigned char vehicle[64]={0},vehicle_class[96]={0},vehicle_base[96]={0};
     unsigned char nearby[64]={0},nearby_class[96]={0},storage[64]={0};
-    void *ptr=explosive;memcpy(component+0xA8,&ptr,8);
+    void *ptr=test_level;memcpy(explosive+0x20,&ptr,8);
+    ptr=explosive;memcpy(component+0xA8,&ptr,8);
     ptr=root;memcpy(explosive+0x148,&ptr,8);
     ptr=mount;memcpy(root+0xC8,&ptr,8);
     ptr=vehicle;memcpy(mount+0xA8,&ptr,8);
@@ -269,5 +297,17 @@ int main(void) {
     CHECK(DeleteFileW(config));load_options(config);CHECK(!allow_attached_vehicle_destruction && safe_explosions);
     puts("PASS: legacy Enabled key ignored; session-only ON/OFF exports and inactive rejection; config defaults/true/false/invalid; attached vehicle opt-in; nearby and cargo-mounted exclusions; base protection.");
     puts("PASS: protected equipment; caches/debris/consumables and inheritance; real detour/trampoline execution; exact field writes; atomic mismatch refusal.");
+    for(unsigned explosions=0;explosions<2;++explosions) {
+        safe_explosions=(LONG)explosions;
+        for(unsigned vehicles=0;vehicles<2;++vehicles) {
+            allow_attached_vehicle_destruction=(int)vehicles;last_status=active_status();
+            CHECK(status_choice()==(explosions ? (vehicles ? 2u:1u):(vehicles ? 4u:3u)));
+        }
+    }
+    last_status="INACTIVE: Explosion code could not be verified.";CHECK(status_choice()==7);
+    last_status="INACTIVE: Name pool could not be verified.";CHECK(status_choice()==8);
+    last_status="INACTIVE: Required object fields could not be verified.";CHECK(status_choice()==9);
+    last_status="INACTIVE: Native initialization failed.";CHECK(status_choice()==13);
+    puts("PASS: native status query selects actual state and compatibility failures without files.");
     return 0;
 }

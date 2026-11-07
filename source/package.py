@@ -24,10 +24,11 @@ assert metadata["name"] and metadata["author"]
 build = root / "build"
 build.mkdir(exist_ok=True)
 pak = build / f"000-{mod_id}-{version}_P.pak"
-archive = root / f"Baby-Proof-Explosions-{version}.zip"
+dist = root / "dist"
+dist.mkdir(exist_ok=True)
+archive = dist / f"Baby-Proof-Explosions-{version}.zip"
 files = (
     "config.ini",
-    "enabled.txt",
     "Scripts/main.lua",
     "Scripts/BabyProofDynamitesNative.dll",
 )
@@ -42,7 +43,6 @@ with tempfile.TemporaryDirectory(dir=build) as temp:
         target = payload / "UE4SS" / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(args.mod / name, target)
-    (payload / "UE4SS/Scripts/BabyProofDynamites-events.txt").write_bytes(b"")
     subprocess.run(
         [str(args.repak), "pack", "--version", "V8B", "--mount-point", "../../../",
          str(payload), str(pak)], check=True

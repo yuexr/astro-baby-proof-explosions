@@ -54,22 +54,6 @@ static void load_config(void) {
     load_options(path);
 }
 
-static void write_status(const char *text) {
-    wchar_t path[32768];
-    DWORD n = GetModuleFileNameW(self_module, path, 32768);
-    if (!n || n >= 32700) return;
-    while (n && path[n-1] != L'\\' && path[n-1] != L'/') --n;
-    const wchar_t name[] = L"BabyProofDynamites-status.txt";
-    memcpy(path+n, name, sizeof(name));
-    HANDLE f = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, NULL,
-                          CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (f != INVALID_HANDLE_VALUE) {
-        DWORD written;
-        WriteFile(f, text, (DWORD)strlen(text), &written, NULL);
-        CloseHandle(f);
-    }
-}
-
 // Find the signature in the game executable.
 static unsigned char *find_target_masked(unsigned char *base, const unsigned char *pattern, size_t pattern_size, size_t skip, size_t skip_size, unsigned *matches) {
     IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)base;
@@ -117,25 +101,37 @@ static unsigned char *allocate_near(unsigned char *target) {
 
 static void put32(unsigned char *at, int32_t value) { memcpy(at, &value, 4); }
 // Set blast values, replay the overwritten instructions, then return to Detonate.
+static int should_protect_component(void *component);
+
 static size_t build_stub(unsigned char *p, unsigned char *target) {
     const uint32_t offsets[] = {0xB8,0xC0,0xC4,0xC8};
     const float values[] = {0.000001f,0.0f,0.001f,0.001f};
     size_t n=0;
-    // Preserve flags and stack. RAX is overwritten by the original prologue.
-    p[n++]=0x9C; // pushfq
-    p[n++]=0x48;p[n++]=0xB8;
-    uintptr_t enabled=(uintptr_t)&safe_explosions;memcpy(p+n,&enabled,8);n+=8;
-    p[n++]=0x83;p[n++]=0x38;p[n++]=0; // cmp dword ptr [rax], 0
-    p[n++]=0x74;p[n++]=40; // skip the four field writes when OFF
-    for (unsigned i=0;i<4;++i) {
-        p[n++]=0xC7; p[n++]=0x81; // mov dword ptr [rcx+offset], immediate
-        memcpy(p+n,&offsets[i],4); n+=4;
-        memcpy(p+n,&values[i],4); n+=4;
+    // Preserve entry registers, SIMD arguments and flags across the authority check.
+    const unsigned char save[]={0x9C,0x51,0x52,0x41,0x50,0x41,0x51,0x41,0x52,0x41,0x53,
+                                0x48,0x81,0xEC,0x80,0,0,0};
+    memcpy(p+n,save,sizeof(save));n+=sizeof(save);
+    for(unsigned i=0;i<6;++i) {
+        const unsigned char op[]={0xF3,0x0F,0x7F,(unsigned char)(0x44+i*8),0x24,(unsigned char)(0x20+i*16)};
+        memcpy(p+n,op,sizeof(op));n+=sizeof(op);
     }
-    p[n++]=0x9D; // popfq
-    memcpy(p+n,signature,PATCH_SIZE); n+=PATCH_SIZE;
-    p[n++]=0xE9;
-    put32(p+n,(int32_t)((intptr_t)(target+PATCH_SIZE)-(intptr_t)(p+n+4))); n+=4;
+    p[n++]=0x48;p[n++]=0xB8;
+    uintptr_t check=(uintptr_t)&should_protect_component;memcpy(p+n,&check,8);n+=8;
+    p[n++]=0xFF;p[n++]=0xD0;
+    for(unsigned i=0;i<6;++i) {
+        const unsigned char op[]={0xF3,0x0F,0x6F,(unsigned char)(0x44+i*8),0x24,(unsigned char)(0x20+i*16)};
+        memcpy(p+n,op,sizeof(op));n+=sizeof(op);
+    }
+    const unsigned char restore[]={0x48,0x81,0xC4,0x80,0,0,0,0x41,0x5B,0x41,0x5A,0x41,0x59,0x41,0x58,0x5A,0x59,
+                                   0x85,0xC0,0x74,40};
+    memcpy(p+n,restore,sizeof(restore));n+=sizeof(restore);
+    for(unsigned i=0;i<4;++i) {
+        p[n++]=0xC7;p[n++]=0x81;
+        memcpy(p+n,offsets+i,4);n+=4;memcpy(p+n,values+i,4);n+=4;
+    }
+    p[n++]=0x9D;
+    memcpy(p+n,signature,PATCH_SIZE);n+=PATCH_SIZE;
+    p[n++]=0xE9;put32(p+n,(int32_t)((intptr_t)(target+PATCH_SIZE)-(intptr_t)(p+n+4)));n+=4;
     return n;
 }
 
@@ -224,8 +220,43 @@ static int is_packaged_rail_car(void *actor) {
     return class_matches(pickup_class,4);
 }
 
+// Resolve pointer fields through reflection rather than assuming world/level offsets.
+static int object_pointer_field(void *object, const char *field, void **value) {
+    unsigned char *cls;
+    if(!object || !name_pool || !checked_read((unsigned char *)object+0x10,&cls,8)) return 0;
+    for(unsigned depth=0;cls && depth<64;++depth) {
+        unsigned char *property;
+        if(!checked_read(cls+0x50,&property,8)) return 0;
+        for(unsigned count=0;property && count<2048;++count) {
+            unsigned char data[0x50];uint32_t index,size,offset;char name[256];
+            if(!checked_read(property,data,sizeof(data))) return 0;
+            memcpy(&index,data+0x28,4);memcpy(&size,data+0x3C,4);memcpy(&offset,data+0x4C,4);
+            if(!checked_name(name_pool,index,name)) return 0;
+            if(!strcmp(name,field)) {
+                if(size!=8 || offset>0x10000) return 0;
+                return checked_read((unsigned char *)object+offset,value,8);
+            }
+            memcpy(&property,data+0x20,8);
+        }
+        if(property || !checked_read(cls+0x40,&cls,8)) return 0;
+    }
+    return 0;
+}
+
+static int should_protect_component(void *component) {
+    void *owner,*level,*world,*mode;
+    if(!safe_explosions || !component ||
+       !checked_read((unsigned char *)component+0xA8,&owner,8) || !owner ||
+       !checked_read((unsigned char *)owner+0x20,&level,8) || !level ||
+       !object_pointer_field(level,"OwningWorld",&world) || !world ||
+       !object_pointer_field(world,"AuthorityGameMode",&mode)) return 0;
+    // AuthorityGameMode exists only in authoritative (standalone/server) worlds.
+    return mode!=NULL;
+}
+
 static unsigned char guarded_destroy(void *component, void *actor) {
-    int enabled=safe_explosions!=0;
+    if(!should_protect_component(component)) return original_destroy(component,actor);
+    int enabled=1;
     int allowed=1,packaged_rail=0;
     if (enabled) {
         int attached_vehicle=is_attached_vehicle(component,actor);
@@ -244,33 +275,7 @@ static unsigned char guarded_destroy(void *component, void *actor) {
         // Protect lids that are still attached to a research aid.
         if (actor_matches(actor,2) && immediate_parent(actor)) allowed=0;
     }
-    // Record the filter decision and the game's return value.
-    char name[256]="unknown",report[384];
-    if (actor && name_pool) {
-        unsigned char *cls=*(unsigned char **)((unsigned char *)actor+0x10);
-        if (cls) {
-            uint32_t index;memcpy(&index,cls+0x18,4);
-            if ((index>>16)<8192) {
-                unsigned char *block=*(unsigned char **)(name_pool+0x10+(index>>16)*8);
-                if(block) {
-                    unsigned char *entry=block+(index&65535)*2;
-                    uint16_t header;memcpy(&header,entry,2);unsigned len=header>>6;
-                    if(len && len<256 && !(header&1)) {memcpy(name,entry+2,len);name[len]=0;}
-                }
-            }
-        }
-    }
-    unsigned char result=allowed ? original_destroy(component,actor) : 0;
-    snprintf(report,sizeof(report),"classic-v1.4.0 target=%s allowed=%d native_result=%u packaged_rail=%d safe_bombs=%d\r\n",name,allowed,(unsigned)result,packaged_rail,enabled);
-    // Keep event records separate from startup status.
-    wchar_t path[32768];DWORD n=GetModuleFileNameW(self_module,path,32768);
-    if(n && n<32600) {
-        while(n && path[n-1]!=L'\\') --n;
-        wcscpy(path+n,L"BabyProofDynamites-events.txt");
-        HANDLE f=CreateFileW(path,FILE_APPEND_DATA,FILE_SHARE_READ,NULL,OPEN_ALWAYS,0,NULL);
-        if(f!=INVALID_HANDLE_VALUE) {DWORD written;WriteFile(f,report,(DWORD)strlen(report),&written,NULL);CloseHandle(f);}
-    }
-    return result;
+    return allowed ? original_destroy(component,actor) : 0;
 }
 
 typedef struct Patch {
@@ -340,7 +345,7 @@ static const char *compatibility_failure(unsigned char *game, const char *reason
     IMAGE_DOS_HEADER *dos=(IMAGE_DOS_HEADER *)game;
     IMAGE_NT_HEADERS64 *nt=(IMAGE_NT_HEADERS64 *)(game+dos->e_lfanew);
     snprintf(compatibility_status,sizeof(compatibility_status),
-        "INACTIVE: %s Game build %08lX/%08lX; mod 1.4.0. No memory was patched.",
+        "INACTIVE: %s Game build %08lX/%08lX; mod 1.4.1. No memory was patched.",
         reason,(unsigned long)nt->FileHeader.TimeDateStamp,(unsigned long)nt->OptionalHeader.SizeOfImage);
     return compatibility_status;
 }
@@ -401,7 +406,6 @@ static const char *activate(void) {
 __declspec(dllexport) int luaopen_babyproofdynamites(void *lua_state) {
     (void)lua_state;
     if (InterlockedCompareExchange(&initialized, 1, 0)==0) last_status=activate();
-    write_status(last_status);
     return 0;
 }
 
@@ -411,7 +415,6 @@ __declspec(dllexport) int luaopen_babyproofdynamites_refresh(void *lua_state) {
         load_config();
         last_status=active_status();
     }
-    write_status(last_status);
     return 0;
 }
 
@@ -420,7 +423,6 @@ static int set_safe_explosions(LONG enabled) {
         InterlockedExchange(&safe_explosions,enabled);
         last_status=active_status();
     }
-    write_status(last_status);
     return 0;
 }
 
@@ -438,4 +440,26 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
     (void)reserved;
     if (reason==DLL_PROCESS_ATTACH) { self_module=instance; DisableThreadLibraryCalls(instance); }
     return TRUE;
+}
+
+static unsigned status_choice(void) {
+    if(!strncmp(last_status,"ACTIVE:",7))
+        return safe_explosions ? (allow_attached_vehicle_destruction ? 2u : 1u)
+                               : (allow_attached_vehicle_destruction ? 4u : 3u);
+    if(!strcmp(last_status,"Not initialized.")) return 5;
+    if(strstr(last_status,"Steam Win64")) return 6;
+    if(strstr(last_status,"Explosion code")) return 7;
+    if(strstr(last_status,"Name pool")) return 8;
+    if(strstr(last_status,"Required object fields")) return 9;
+    if(strstr(last_status,"allocate nearby")) return 10;
+    if(strstr(last_status,"prepare native")) return 11;
+    if(strstr(last_status,"install both")) return 12;
+    return 13;
+}
+
+__declspec(dllexport) int luaopen_babyproofdynamites_status(void *lua_state) {
+    if(!lua_state) return 0;
+    // main.lua supplies 13 status strings. Lua returns the top N arguments;
+    // the first result is the selected string. No Lua runtime ABI dependency.
+    return (int)(14-status_choice());
 }

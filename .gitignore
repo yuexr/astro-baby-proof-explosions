@@ -9,3 +9,4 @@ __pycache__/
 # Release downloads
 *.zip
 *.pak
+dist/

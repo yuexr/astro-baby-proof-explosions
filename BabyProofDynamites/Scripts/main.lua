@@ -12,10 +12,44 @@ if not turnOn then error("[Baby-Proof Explosions] Couldn't load the ON function:
 local turnOff, offReason = package.loadlib(dllPath, "luaopen_babyproofdynamites_off")
 if not turnOff then error("[Baby-Proof Explosions] Couldn't load the OFF function: " .. tostring(offReason)) end
 
+local clientMessage = "Baby-proof Explosions is a server side mod. Only the host can change protection settings.\n" ..
+    "If the host does not have the mod installed, vanilla explosions apply."
+
+local function isHost()
+    local ok, host = pcall(function()
+        local instance = FindFirstOf("GameInstance")
+        if not instance or not instance:IsValid() then return nil end
+        local world = instance:GetWorld()
+        if not world or not world:IsValid() then return nil end
+        local mode = world.AuthorityGameMode
+        return mode ~= nil and mode:IsValid()
+    end)
+    if not ok then return nil end
+    return host
+end
+
+local queryStatus, statusReason = package.loadlib(dllPath, "luaopen_babyproofdynamites_status")
+if not queryStatus then error("[Baby-Proof Explosions] Couldn't load the status function: " .. tostring(statusReason)) end
+
+local nativeStatuses = {
+    "ACTIVE: Safe explosions ON. Attached vehicle destruction OFF.",
+    "ACTIVE: Safe explosions ON. Attached vehicle destruction ON.",
+    "ACTIVE: Safe explosions OFF. Attached vehicle destruction OFF.",
+    "ACTIVE: Safe explosions OFF. Attached vehicle destruction ON.",
+    "INACTIVE: Not initialized.",
+    "INACTIVE: Steam Win64 Astroneer is required.",
+    "INACTIVE: Explosion code could not be verified. No memory was patched.",
+    "INACTIVE: Name pool could not be verified. No memory was patched.",
+    "INACTIVE: Required object fields could not be verified. No memory was patched.",
+    "INACTIVE: Cannot allocate nearby memory. No memory was patched.",
+    "INACTIVE: Cannot prepare native filters. No memory was patched.",
+    "INACTIVE: Could not safely install both filters. Restart to retry.",
+    "INACTIVE: Native initialization failed."
+}
+
 local function readStatus()
-    local file, err = io.open(directory .. "BabyProofDynamites-status.txt", "r")
-    if not file then error("Couldn't read the status file: " .. tostring(err)) end
-    local text = file:read("*a"); file:close()
+    local text = queryStatus(table.unpack(nativeStatuses))
+    if type(text) ~= "string" then error("Couldn't read native protection status.") end
     if not text:match("^ACTIVE:") then
         return { active = false, text = text }
     end
@@ -94,12 +128,18 @@ end
 initialize()
 local startupOK, startup = pcall(readStatus)
 if startupOK then
-    print("[Baby-Proof Explosions] " .. statusMessage(startup) .. "\n")
+    print("[Baby-Proof Explosions] Loaded. Protection applies only to the host/server.\n")
 else
-    print("[Baby-Proof Explosions] Check the status file to see if it loaded.\n")
+    print("[Baby-Proof Explosions] Could not read native protection status.\n")
 end
 
-RegisterConsoleCommandHandler("babyproof", function(_, parameters, output)
+local function handleCommand(_, parameters, output)
+    local host = isHost()
+    if host == false then output:Log(clientMessage .. "\n"); return true end
+    if host == nil then
+        output:Log("Baby-proof Explosions could not determine host status. No settings changed.\n")
+        return true
+    end
     local group = parameters[1] and parameters[1]:lower()
     local action = parameters[2] and parameters[2]:lower()
     if #parameters == 0 then return reply(output, help) end
@@ -123,9 +163,9 @@ RegisterConsoleCommandHandler("babyproof", function(_, parameters, output)
                 turnOff()
             end
             state = readStatus()
-            assert(state.active and state.enabled == (group == "on"), "Setting didn't update. Check the status file.")
+            assert(state.active and state.enabled == (group == "on"), "Setting didn't update. Run babyproof status for details.")
             if group == "on" then
-                assert(state.vehiclesProtected, "Vehicle protection didn't update. Check the status file.")
+                assert(state.vehiclesProtected, "Vehicle protection didn't update. Run babyproof status for details.")
                 return "Vehicle protection saved to config.ini."
             end
             return "This change lasts until the game restarts."
@@ -136,8 +176,8 @@ RegisterConsoleCommandHandler("babyproof", function(_, parameters, output)
         refresh()
         if switchedOn then turnOn() end
         state = readStatus()
-        assert(state.active and state.vehiclesProtected == protect, "Setting didn't update. Check the status file.")
-        if protect then assert(state.enabled, "Babyproof didn't turn ON. Check the status file.") end
+        assert(state.active and state.vehiclesProtected == protect, "Setting didn't update. Run babyproof status for details.")
+        if protect then assert(state.enabled, "Babyproof didn't turn ON. Run babyproof status for details.") end
         return (switchedOn and "Babyproof turned ON. " or "") .. "Vehicle protection saved to config.ini."
     end)
     if not ok then
@@ -145,4 +185,16 @@ RegisterConsoleCommandHandler("babyproof", function(_, parameters, output)
         print("[Baby-Proof Explosions] " .. message .. "\n")
     end
     return reply(output, message)
-end)
+end
+
+-- UE4SS matches command names exactly; register each capitalization once.
+local function registerCommandCases(prefix, remaining)
+    if remaining == "" then
+        RegisterConsoleCommandHandler(prefix, handleCommand)
+        return
+    end
+    local first, rest = remaining:sub(1, 1), remaining:sub(2)
+    registerCommandCases(prefix .. first, rest)
+    registerCommandCases(prefix .. first:upper(), rest)
+end
+registerCommandCases("", "babyproof")

@@ -1,20 +1,22 @@
 ![Baby-Proof Explosions](./img/babyproof-banner.png)
 
-# Baby-Proof Explosions 1.4.0
+# Baby-Proof Explosions
 
 Makes all explosions (from dynamites, gas, flora, etc.) tiny with negligible blast force that effectively do not damage terrain or players. Equipment is protected from the game's direct explosion-destruction checks.
 
 EXO caches and supported debris are still destroyable and release intended objects. Vehicle protection can be toggled in game. Dynamite must be directly attached to the item intended to break.
 
+Multiplayer tested.
 
 ## Install
 
-The mod folder and files retain the `BabyProofDynamites` name for compatibility with previous versions.
-
 Vortex and AstroModLoader-Classic installation recommended.
 
-[Please see detailed installation guide here.](https://yuexr.github.io/astro/mods/installation/)
+[Please see detailed installation guide here.](https://yuexr.github.io/astro/mods/installation.html)
 
+UE4SS (and UE4SS ConsoleCommandsMod) required. Both automatically installed through instructions above.
+
+**Multiplayer:** Server-side mod. Only the host needs to have the mod installed, and only the host can change protection settings. Guests cannot change settings whether or not the mod is installed.
 
 ## Baby-Proof Explosions Controls
 
@@ -33,7 +35,7 @@ babyproof                  shows all commands
 
 babyproof status           reports current protection status
 babyproof on               enables safe explosions
-babyproof off              restores vanilla explosions (DANGEROUS)
+babyproof off              restores vanilla explosions (BE CAREFUL!)
 
 babyproof vehicles on      vehicles are safe & protected from explosives!
 babyproof vehicles off     vehicles can be destroyed by attached explosives
@@ -42,7 +44,7 @@ babyproof v on/off         v can be used as alias for vehicles
 ```
 *All commands also report current protection status.*
 
-Tips & notes:
+**Tips & notes:**
 - Protection always resets to `babyproof ON` upon every game launch.
 - `babyproof ON` restores full protection, and also overwrites vehicle protection status by turning `babyproof vehicles ON`. This is a safety feature!
 - Vehicle protection is saved automatically when changed and carries over between sessions. Check status if unsure!
